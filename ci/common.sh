@@ -5,6 +5,7 @@ fresh_db() { psql -qX -d postgres -c "DROP DATABASE IF EXISTS $1 WITH (FORCE)" -
 start_server() {   # start_server PORT [VAR=VAL ...]: fresh database, server in the background, waits for /health
   local port=$1; shift
   fresh_db feed_ci
+  [ -z "${PGSET:-}" ] || psql -qX -d postgres -c "ALTER DATABASE feed_ci SET $PGSET"
   ( cd "$SUB" && exec env DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/feed_ci \
       JWT_SECRET=million-users-challenge HOST=0.0.0.0 PORT=$port EXTRA_PORT=$((port + 1)) "$@" "$BIN" ) \
       > /tmp/srv.log 2>&1 &

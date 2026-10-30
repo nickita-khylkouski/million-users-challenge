@@ -39,6 +39,10 @@ jobs:
       - name: postgres max_connections = 600
         run: |
           psql -qX -d postgres -c "ALTER SYSTEM SET max_connections = 600"
+          # logs for the load runs: statements over 50 ms, lock waits over 100 ms, every autovacuum
+          psql -qX -d postgres -c "ALTER SYSTEM SET log_min_duration_statement = '50ms'" \
+            -c "ALTER SYSTEM SET log_lock_waits = on" -c "ALTER SYSTEM SET deadlock_timeout = '100ms'" \
+            -c "ALTER SYSTEM SET log_autovacuum_min_duration = 0"
           docker restart "$(docker ps -q --filter ancestor=postgres:18)"
           until pg_isready -q; do sleep 1; done
       - name: seed
@@ -63,7 +67,7 @@ jobs:
         if: always()
         run: bash ci/steer.sh
       - name: start-up loop (detector edge cases)
-        if: always()
+        if: always() && !contains(github.event.head_commit.message, '[diag]')
         run: bash ci/startloop.sh
       - name: delayed ACKs
         if: always()
@@ -85,10 +89,14 @@ jobs:
         continue-on-error: true
         run: THINK=0.25 bash ci/load.sh
       - name: mload, 10x the request rate, the PR's first commit (control)
-        if: always()
+        if: always() && !contains(github.event.head_commit.message, '[diag]')
         continue-on-error: true
         run: SUB=/tmp/pr61/submissions/asm-epoll-nickita-khylkouski THINK=0.25 bash ci/load.sh
       - name: mload, 10x the request rate, the c-epoll entry (reference)
         if: always()
         continue-on-error: true
         run: SUB=$PWD/submissions/c-epoll-unorig-username BIN=bin/server THINK=0.25 bash ci/load.sh
+      - name: mload, 10x the request rate, synchronous_commit off (diagnostic)
+        if: always()
+        continue-on-error: true
+        run: PGSET="synchronous_commit = off" THINK=0.25 bash ci/load.sh
