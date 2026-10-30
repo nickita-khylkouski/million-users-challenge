@@ -733,6 +733,16 @@ listen_on:
     lea r10, [rsp + 32]
     mov r8d, 4
     SYS SYS_setsockopt
+    # TCP_THIN_LINEAR_TIMEOUTS (inherited as well, checked on 6.8): while fewer than four segments are in flight
+    # (a response is one or two), the retransmission timeout does not double for the first six retries, so a
+    # response lost three times is sent again after 600 ms instead of 800 ms, and after 800 ms instead of 1.6 s
+    # when lost four times. Best effort, the result is not checked.
+    mov rdi, r12
+    mov esi, IPPROTO_TCP
+    mov edx, TCP_THIN_LINEAR_TIMEOUTS
+    lea r10, [rsp + 32]
+    mov r8d, 4
+    SYS SYS_setsockopt
     # TCP_DEFER_ACCEPT
     mov rax, [rip + g_defer]
     test rax, rax

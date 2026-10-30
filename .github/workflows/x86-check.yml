@@ -56,9 +56,16 @@ jobs:
       - name: delayed ACKs
         if: always()
         run: bash ci/ack.sh
+      - name: thin linear timeouts on the server's sockets
+        if: always()
+        run: bash ci/thin.sh
       - uses: actions/setup-go@v5
         if: always()
         with: { go-version-file: bench/mload/go.mod, cache: false }
       - name: mload smoke run
         if: always()
         run: bash ci/load.sh
+      - name: mload, 10x the request rate (informational)
+        if: always()
+        continue-on-error: true
+        run: THINK=0.25 bash ci/load.sh

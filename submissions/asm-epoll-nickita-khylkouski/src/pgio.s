@@ -386,8 +386,14 @@ pgio_submit:
 .Lps_bind_end:
     lea rdi, [rbx + PC_OUT]
     mov rsi, [rsp + 16]
+    cmp r12d, K_FEED
+    je 3f
+    cmp r12d, K_POST
+    je 3f
     call pgw_bind_end
-    lea rdi, [rbx + PC_OUT]
+    jmp 4f
+3:  call bind_end_row
+4:  lea rdi, [rbx + PC_OUT]
     call pgw_execute
     # the op
     SLOT rdx, r13d
@@ -438,6 +444,25 @@ pgio_submit:
     pop r13
     pop r12
     pop rbx
+    ret
+
+# ---------------------------------------------------------------- bind_end_row(buf, handle)
+# Result formats of a post row (id, body, created_at, username, like_count): text, text, binary, text, text. The
+# two integers come back as decimal digits, copied into the JSON as they are: no conversion, and on this data a
+# few bytes per row fewer than the 8 + 4 of binary. created_at stays an 8-byte timestamp. Then patch the Bind's
+# length (as pgw_bind_end).
+bind_end_row:
+    mov r9, [rdi + PGB_PTR]
+    mov rax, [rdi + PGB_LEN]
+    mov rcx, 0x0100000000000500         # int16 5, then 0, 0, 1 ...
+    mov [r9 + rax], rcx
+    mov dword ptr [r9 + rax + 8], 0     # ... 0, 0
+    add rax, 12
+    mov [rdi + PGB_LEN], rax
+    sub rax, rsi
+    dec rax
+    bswap eax
+    mov [r9 + rsi + 1], eax
     ret
 
 # ---------------------------------------------------------------- pgio_flush()

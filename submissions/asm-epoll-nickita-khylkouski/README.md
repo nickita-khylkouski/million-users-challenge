@@ -18,31 +18,40 @@ passes 42/42.
 ## Architecture
 
 Everything is built around one question: how many idle-but-live keep-alive connections can one 16-vCPU
-box with a single-queue virtio NIC keep answering within the latency budget. Around a million connections
-the box is not CPU-bound on HTTP or JSON; it is bound by packets per second on the one core that takes the
-NIC interrupt, and by anything that makes a connection cost more than a few hundred bytes.
+box with a single-queue NIC keep answering within the latency budget. At a million connections the work per
+request is small; what runs out first is expected to be packets per second on the one core that takes the
+NIC interrupt, and memory, so the design spends effort on both and little on HTTP or JSON speed.
 
 **Workers.** One thread per CPU, pinned, with its own `epoll` set, its own `SO_REUSEPORT` listening sockets
 on both ports, and its own Postgres connections. Nothing is shared between workers after start: no locks,
 no atomics, no cross-thread queues. The only process-wide table is the connection slot array (32 bytes per
 fd, indexed by fd), which a worker only touches for its own fds.
 
-**The interrupt core is skipped.** With a single-queue NIC every packet first lands on one CPU (NAPI, GRO,
-the RPS dispatch), which then also carries its share of the TCP work and a worker. Reading
-`/proc/softirqs` at start finds the column whose `NET_RX` count dominates; that CPU gets no worker when the
-box has 4 or more CPUs. (`SKIP_IRQ_CPU=0` turns this off.)
+**The interrupt core is skipped.** With a single-queue NIC every packet first lands on one CPU (the
+interrupt, NAPI polling, GRO and the RPS hand-off to the other CPUs), on top of its own share of the TCP work.
+That CPU gets no worker. At start the server looks in `/proc/interrupts` for virtio-net's receive-queue line
+(`virtioN-input.Q`). With exactly one, the CPU named in `/proc/irq/N/effective_affinity_list` is skipped, or,
+if that file lists several CPUs, the one whose column counts the most interrupts. With several receive queues
+nothing is skipped. Without such a line (another NIC driver), `/proc/softirqs` decides: a CPU whose `NET_RX`
+count is more than four times every other CPU's is skipped. This only applies with 4 or more CPUs, and
+`SKIP_IRQ_CPU=0` turns it off.
 
-**Flow steering.** Each listener group gets a classic BPF program attached with
-`SO_ATTACH_REUSEPORT_CBPF` that returns the index of the worker pinned to the CPU on which the SYN was
-processed (`SKF_AD_CPU`). With RPS spreading flows over all CPUs by hash, the TCP softirq work of a flow
-and the worker that reads and writes its socket are then on the same core: the socket's data stays in
-one cache, and no cross-CPU wakeups are needed. (`STEER=0` turns it off.)
+**Flow steering.** Each port's listener group gets a classic BPF program (`SO_ATTACH_REUSEPORT_CBPF`) that
+returns the index of the worker pinned to the CPU on which the SYN was processed (`SKF_AD_CPU`). For a CPU
+without a worker it returns an out-of-range index, and the kernel falls back to its usual hash. With RPS
+spreading flows over all CPUs by hash, a connection's softirq work and the worker that reads and writes its
+socket are then on the same core: the socket's data stays in one cache and no cross-CPU wakeup is needed.
+(The box also has RFS on, which moves a flow to its reader's CPU once the socket has been read; steering
+puts it there from the SYN on, including the accept wakeup.)
+The spread of new connections is now only as even as RPS makes it, so worker 0 checks it once a second.
+If one worker took more than twice its even share of a window of at least 64 new connections per worker,
+the program is detached from both groups and the kernel's hash takes over (`STEER=0` turns steering off).
 
 **One packet in, one packet out.** Every response is one contiguous buffer (head + body) handed to a
 single `sendto`, so it is one skb (one or two frames) and carries the ACK of the request with it. For
 that the socket has to be in the kernel's delayed-ACK ("pingpong") mode; otherwise a request that comes
 after a pause longer than the RTO, which is every request at these think times, is ACKed at once in a
-packet of its own. Three things keep the socket in that mode (all checked with tcpdump on Linux 6.8):
+packet of its own. Three things keep the socket in that mode (all checked with tcpdump on Linux 6.8 and 7.0):
 
 - `TCP_QUICKACK` is cleared on the listeners *after* `listen()`. `inet_csk_listen_start()` resets the
   listener's ACK state, so set before `listen()` the option never reaches the accepted sockets: the first
@@ -51,29 +60,39 @@ packet of its own. Three things keep the socket in that mode (all checked with t
   (`TCP_DELACK_MIN`), and when it fires the socket leaves pingpong mode.
 - When a response was late anyway (`QUICKACK_MS`, default 25 ms, counted from when the request reached the
   kernel, which `TCP_INFO`'s `tcpi_last_data_recv` tells for the oldest request of each epoll batch), the
-  server sets `TCP_QUICKACK=0` on that socket again. One slow response then costs one extra packet
-  instead of one per request from there on, which is what stops overload from feeding on itself.
+  server sets `TCP_QUICKACK=0` on that socket again. Without that the next request would draw a pure ACK
+  of its own before the socket re-enters the mode. Responses that are late every time gain nothing: the
+  timer's ACK goes out either way.
 
 (A request that arrives in two segments, or is larger than one MSS, is ACKed at once whatever the mode;
 the benchmark's requests are single writes under 1 KB, so that does not come up.)
 `TCP_DEFER_ACCEPT` means accept only returns when the first request has arrived, so there is no idle
-wakeup per connection (it changes no packets). The feed body is gzipped when the client accepts it
-(bodies of 1 KB or more): 5.1 KB becomes 1.9 KB, from four segments to two in one skb, and the client's
-GRO sees one packet and answers with one ACK. A single-segment feed is out of reach (gzip's floor on the
-feed is 1881 bytes against about 1290 bytes of room), so that is as low as it goes. What is left per
-request on a warm connection is the request, the response and the client's one ACK of it, plus what the
-client adds on its own (the Go dialer's 15 s keepalive probes and their answers, about one pair per
-request at the scoring think times).
+wakeup per connection (it changes no packets). Bodies of 1 KB or more are gzipped when the client accepts
+gzip. On the seed data the feed is 5.1 KB and gzips to 1.9 KB: two segments in one skb instead of four, which
+the client's GRO takes as one packet and answers with one ACK. Under the load generator, whose posts are
+short, the feed is about 3.6 KB and gzips to about 760 bytes, one segment. What is left per request on a
+warm connection is the request, the response and the client's one ACK of it, plus what the client adds on
+its own (the Go dialer's 15 s keepalive probes and their answers, about one pair per request at the
+scoring think times).
 
-**Postgres.** Every worker owns a few pipelined connections (`PG_CONNS` in total, default 64, divided over
-the workers). Statements are appended to a connection's output buffer as `Bind`/`Execute` and sent once
-per event-loop iteration behind a single `Sync`, so one round trip and one pair of packets carry a whole
-batch of feed and post reads. Writes (`POST /posts`, likes) get their own `Sync` and are answered only
-when the `ReadyForQuery` after it arrives, which is when the transaction is committed. Results are read
-back in order through a small op ring per connection; a late result for a connection that has since been
-closed and reused is detected with a generation counter and dropped. A connection that dies answers its
-pending ops with 500 and is reconnected once per second. Health is a real `SELECT 1` through the same
-path; without a working connection it is answered 503 immediately.
+**Lost packets.** A lost response is sent again after about 200 ms (the tail-loss probe, then the
+retransmission timer, whose minimum is 200 ms), and after that the kernel doubles the wait every time. With
+`TCP_THIN_LINEAR_TIMEOUTS`, set on the listeners (accepted sockets inherit it; checked on Linux 6.8) and on
+the Postgres connections, the wait stays at the minimum for the first six retransmissions as long as fewer
+than four segments are in flight, and under the benchmark a response is one or two: one lost three times
+arrives after about 600 ms instead of 800 ms, one lost four times after 800 ms instead of 1.6 s.
+
+**Postgres.** Every worker owns a few pipelined connections (`PG_CONNS` in total, default 64, divided over the
+workers). Statements are appended to a connection's output buffer as `Bind`/`Execute` and sent once per
+event-loop iteration behind a single `Sync`, so one round trip and one pair of packets carry a whole batch of
+feed and post reads. Writes (`POST /posts`, likes) get their own `Sync` and are answered only when the
+`ReadyForQuery` after it arrives, which is when the transaction is committed. Results are read back in order
+through a small op ring per connection; a late result for a connection that has since been closed and reused
+is detected with a generation counter and dropped. Rows come back in binary except `id` and `like_count`,
+which are asked for as text: the digits go into the JSON as they are, and a feed result is about 100 bytes
+(2–3%) shorter than with 8- and 4-byte integers. Postgres results are most of what the box receives. A
+connection that dies answers its pending ops with 500 and is reconnected once per second. Health is a real
+`SELECT 1` through the same path; without a working connection it is answered 503 immediately.
 
 **Memory per connection.** Idle connections own nothing but their 32-byte slot. A read buffer is borrowed
 from the worker while a request is parsed and only kept (allocated from a per-worker size-class
@@ -103,20 +122,37 @@ alone (only a failed database round trip).
 | `QUICKACK_MS` | 25 | re-arm delayed ACKs on a socket after a response this late (0 = off) |
 | `BATCH_US` / `BATCH_MIN` | 2000 / 32 | event-loop batching, see above |
 
-The server logs its choices at start (`workers`, `net_rx cpu`, `postgres connections per worker`).
+The server logs its choices at start: `workers`, `net_rx cpu` (the skipped CPU, -1 for none), `nic rx
+interrupt` (when `/proc/interrupts` was read), `postgres connections per worker` and `cpu steering program`
+(0 = attached). If the guard detaches the program later it logs `cpu steering detached` with the busiest
+worker's share.
 
 ## Testing
 
-`bash test/run.sh submissions/asm-epoll-nickita-khylkouski` passes all 42 checks on a fresh seed copy. On
-top of that the server was exercised with a protocol probe (pipelined requests, gzip round trip,
-`Expect: 100-continue`, requests split across packets, `Connection: close`, HTTP/1.0, oversize requests,
-hundreds of concurrent pipelined connections) and with the challenge's own `bench/mload` generator.
+`bash test/run.sh submissions/asm-epoll-nickita-khylkouski` passes all 42 checks on Ubuntu 24.04 and 22.04
+(whose binutils 2.38 builds a byte-identical binary). Beyond that:
 
-The ACK behaviour was checked with tcpdump on Linux 6.8.0 (one keep-alive connection, requests 1.5 s
-apart): no pure ACK from the server on a fresh connection's first request, none on warm requests, and
-after a response held up 300 ms by a stalled Postgres (where the kernel's timer ACK is unavoidable) the
-next request again rides its ACK on the response, while with `QUICKACK_MS=0` it draws a pure ACK and
-with `QUICKACK=1` the first request does too.
+- **Protocol probe.** Pipelined requests, gzip round trips, `Expect: 100-continue`, requests split across
+  packets, `Connection: close`, HTTP/1.0, oversize requests, hundreds of concurrent pipelined connections,
+  JWT edge cases (no `exp`, an `alg` other than HS256, a bad `sub`), and Postgres killed mid-run.
+- **Load.** The challenge's `bench/mload` with 20,000 users on 4-vCPU GitHub Actions runners: no errors,
+  p95 5.8 ms, p99 6.4 ms, server RSS 7.4 MB.
+- **Steering**, on real x86-64 kernels (GitHub Actions runners with Linux 6.8 and 7.0); x86 emulators refuse
+  `SO_ATTACH_REUSEPORT_CBPF`. The program attaches, and every connection from a client pinned to one CPU
+  lands on that CPU's worker, a different worker for each CPU. When a single CPU opens all the connections
+  the guard detaches the program, and the next connections spread evenly.
+- **Interrupt-core detection**, against fake `/proc/interrupts`, `/proc/softirqs` and affinity files: one,
+  several or no receive-queue lines; single-CPU, range and list affinities; missing and empty files; zero
+  counts; a file larger than the read buffer. Each case was started 100 times on both kernels.
+- **Delayed ACKs**, with tcpdump on loopback on both kernels, with the same counts: one keep-alive
+  connection, requests 1.5 s apart, and two responses made 300 ms late, first by stopping Postgres and then
+  by stopping the server.
+
+| settings | pure ACKs from the server |
+|---|---|
+| defaults | 2: the delayed-ACK timer's, on the two late responses |
+| `QUICKACK_MS=0` | 4: plus one on each request after a late response |
+| `QUICKACK=1` | 3: plus one on the connection's first request |
 
 ## Credits
 
