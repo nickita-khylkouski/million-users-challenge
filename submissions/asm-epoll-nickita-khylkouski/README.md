@@ -77,22 +77,25 @@ scoring think times).
 
 **Lost packets.** A lost response is sent again after about 200 ms (the tail-loss probe, then the
 retransmission timer, whose minimum is 200 ms), and after that the kernel doubles the wait every time. With
-`TCP_THIN_LINEAR_TIMEOUTS`, set on the listeners (accepted sockets inherit it; checked on Linux 6.8) and on
-the Postgres connections, the wait stays at the minimum for the first six retransmissions as long as fewer
-than four segments are in flight, and under the benchmark a response is one or two: one lost three times
+`TCP_THIN_LINEAR_TIMEOUTS`, set on the listeners (accepted sockets inherit it; checked on Linux 6.8 and 7.0)
+and on the Postgres connections, the wait stays at the minimum for the first six retransmissions as long as
+fewer than four segments are in flight, and under the benchmark a response is one or two: one lost three times
 arrives after about 600 ms instead of 800 ms, one lost four times after 800 ms instead of 1.6 s.
 
 **Postgres.** Every worker owns a few pipelined connections (`PG_CONNS` in total, default 64, divided over the
 workers). Statements are appended to a connection's output buffer as `Bind`/`Execute` and sent once per
 event-loop iteration behind a single `Sync`, so one round trip and one pair of packets carry a whole batch of
 feed and post reads. Writes (`POST /posts`, likes) get their own `Sync` and are answered only when the
-`ReadyForQuery` after it arrives, which is when the transaction is committed. Results are read back in order
-through a small op ring per connection; a late result for a connection that has since been closed and reused
-is detected with a generation counter and dropped. Rows come back in binary except `id` and `like_count`,
-which are asked for as text: the digits go into the JSON as they are, and a feed result is about 100 bytes
-(2–3%) shorter than with 8- and 4-byte integers. Postgres results are most of what the box receives. A
-connection that dies answers its pending ops with 500 and is reconnected once per second. Health is a real
-`SELECT 1` through the same path; without a working connection it is answered 503 immediately.
+`ReadyForQuery` after it arrives, which is when the transaction is committed. They also get connections of
+their own, the last quarter of each worker's (at least one): a commit waits for the disk, and on a shared
+connection every read pipelined behind it would wait with it. (When none of a group's connections is up, the
+other group's are used.) Results are read back in order through a small op ring per connection; a late result
+for a connection that has since been closed and reused is detected with a generation counter and dropped. Rows
+come back in binary except `id` and `like_count`, which are asked for as text: the digits go into the JSON as
+they are, and a feed result is about 100 bytes (2–3%) shorter than with 8- and 4-byte integers. Postgres
+results are most of what the box receives. A connection that dies answers its pending ops with 500 and is
+reconnected once per second. Health is a real `SELECT 1` through the same path; without a working connection
+it is answered 503 immediately.
 
 **Memory per connection.** Idle connections own nothing but their 32-byte slot. A read buffer is borrowed
 from the worker while a request is parsed and only kept (allocated from a per-worker size-class
@@ -122,10 +125,10 @@ alone (only a failed database round trip).
 | `QUICKACK_MS` | 25 | re-arm delayed ACKs on a socket after a response this late (0 = off) |
 | `BATCH_US` / `BATCH_MIN` | 2000 / 32 | event-loop batching, see above |
 
-The server logs its choices at start: `workers`, `net_rx cpu` (the skipped CPU, -1 for none), `nic rx
-interrupt` (when `/proc/interrupts` was read), `postgres connections per worker` and `cpu steering program`
-(0 = attached). If the guard detaches the program later it logs `cpu steering detached` with the busiest
-worker's share.
+The server logs its choices at start: `workers`, `net_rx cpu` (the skipped CPU, -1 for none),
+`nic rx interrupt` (when `/proc/interrupts` was read), `postgres connections per worker` (and how many of them
+take the writes) and `cpu steering program` (0 = attached). If the guard detaches the program later it logs
+`cpu steering detached` with the busiest worker's share.
 
 ## Testing
 
@@ -149,7 +152,9 @@ worker's share.
   counts; a file larger than the read buffer. Each case was started 100 times on both kernels.
 - **Retransmission timeouts.** `TCP_THIN_LINEAR_TIMEOUTS` read back from the running server's own sockets
   (duplicated with `pidfd_getfd`) on both kernels: set on all 8 listeners, all 8 accepted test connections and
-  all 64 Postgres connections; the test's own client sockets, the control, read 0.
+  all 64 Postgres connections; the test's own client sockets, the control, read 0. With iptables dropping the
+  server's responses to one test connection for 500 or 900 ms, the response arrived after 625 or 1,041 ms on
+  both kernels, and after 825 ms or 1.64–1.69 s from a build without the option.
 - **Delayed ACKs**, with tcpdump on loopback on both kernels, with the same counts: one keep-alive
   connection, requests 1.5 s apart, and two responses made 300 ms late, first by stopping Postgres and then
   by stopping the server.

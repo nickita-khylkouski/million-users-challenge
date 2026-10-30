@@ -1,6 +1,7 @@
-# pgio.s: asynchronous, pipelined Postgres I/O. Each worker owns W_NPG connections; statements are appended to
-# a connection's output buffer as Bind/Execute pairs and sent once per event-loop iteration behind one Sync
-# (reads) or with their own Sync (writes, so each insert commits on its own before the client is answered).
+# pgio.s: asynchronous, pipelined Postgres I/O. Each worker owns W_NPG connections, the last W_NWR of them for the
+# writes; statements are appended to a connection's output buffer as Bind/Execute pairs and sent once per
+# event-loop iteration behind one Sync (reads) or with their own Sync (writes, so each insert commits on its own
+# before the client is answered).
 # Results come back in order; an op ring per connection remembers which client each result belongs to.
 #
 #   pgio_init()                                   connect + prepare (blocking, at worker start)
@@ -71,6 +72,8 @@ pgio_init:
     push r13
     mov rax, [rip + g_pg_per]
     mov [r15 + W_NPG], rax
+    mov rcx, [rip + g_pg_wr]
+    mov [r15 + W_NWR], rcx
     mov rdi, rax
     shl rdi, 8
     call rt_mmap
@@ -239,51 +242,80 @@ pg_down:
     pop rbx
     ret
 
-# ---------------------------------------------------------------- pick() -> rax = connection to append to | 0
-# Keeps filling the current connection up to PACK statements per iteration, otherwise the live connection with
-# the fewest ops in flight.
+# ---------------------------------------------------------------- pick(write) -> rax = connection to append to | 0
+# The last W_NWR connections take the writes and the others the reads, so a slow commit never holds up reads
+# pipelined behind it. Reads keep filling the current connection up to PACK statements per iteration; otherwise,
+# and for every write, the live connection of their group with the fewest ops in flight. When the group has no
+# live connection, any live connection does.
 pick:
+    test edi, edi
+    jnz .Lpk_write
     mov rax, [r15 + W_RDCUR]
     test rax, rax
-    js .Lpk_search
+    js .Lpk_read
     shl rax, 8
     add rax, [r15 + W_PG]
     cmp dword ptr [rax + PC_FD], 0
-    jl .Lpk_search
+    jl .Lpk_read
     cmp dword ptr [rax + PC_INBATCH], PACK
-    jae .Lpk_search
+    jae .Lpk_read
     cmp dword ptr [rax + PC_N], OPS_CAP - 2
-    ja .Lpk_search
+    ja .Lpk_read
     ret
-.Lpk_search:
-    xor ecx, ecx
-    xor r8d, r8d
-    mov r9d, 0x7fffffff
-    mov rdx, [r15 + W_PG]
-.Lpk_loop:
-    cmp rcx, [r15 + W_NPG]
-    jae .Lpk_done
-    cmp dword ptr [rdx + PC_FD], 0
-    jl .Lpk_next
-    mov eax, [rdx + PC_N]
-    cmp eax, OPS_CAP - 2
-    ja .Lpk_next
-    cmp eax, r9d
-    jae .Lpk_next
-    mov r9d, eax
-    mov r8, rdx
-    mov r10, rcx
-.Lpk_next:
-    inc rcx
-    add rdx, PC_SIZE
-    jmp .Lpk_loop
-.Lpk_done:
-    mov rax, r8
+.Lpk_read:
+    xor esi, esi
+    mov rdx, [r15 + W_NPG]
+    sub rdx, [r15 + W_NWR]
+    call pick_min
     test rax, rax
-    jz 1f
-    mov [r15 + W_RDCUR], r10
+    jnz 1f
+    xor esi, esi
+    mov rdx, [r15 + W_NPG]
+    call pick_min
+    test rax, rax
+    jz 2f
+1:  mov [r15 + W_RDCUR], r10
     mov dword ptr [rax + PC_INBATCH], 0
+2:  ret
+.Lpk_write:
+    mov rsi, [r15 + W_NPG]
+    mov rdx, rsi
+    sub rsi, [r15 + W_NWR]
+    call pick_min
+    test rax, rax
+    jnz 1f
+    xor esi, esi
+    mov rdx, [r15 + W_NPG]
+    call pick_min
 1:  ret
+
+# pick_min(first, end) -> rax = the live connection in [first, end) with the fewest ops in flight and room for
+# two more | 0, r10 = its index.
+pick_min:
+    xor eax, eax
+    mov r9d, 0x7fffffff
+    mov rcx, rsi
+    shl rsi, 8
+    add rsi, [r15 + W_PG]
+.Lpm_loop:
+    cmp rcx, rdx
+    jae .Lpm_done
+    cmp dword ptr [rsi + PC_FD], 0
+    jl .Lpm_next
+    mov r8d, [rsi + PC_N]
+    cmp r8d, OPS_CAP - 2
+    ja .Lpm_next
+    cmp r8d, r9d
+    jae .Lpm_next
+    mov r9d, r8d
+    mov rax, rsi
+    mov r10, rcx
+.Lpm_next:
+    inc rcx
+    add rsi, PC_SIZE
+    jmp .Lpm_loop
+.Lpm_done:
+    ret
 
 # ---------------------------------------------------------------- pgio_submit(kind, fd, flags, id, uid, aux) -> 1 | 0
 .globl pgio_submit
@@ -300,6 +332,10 @@ pgio_submit:
     mov rbp, rcx                        # post id
     mov [rsp], r8                       # user id
     mov [rsp + 8], r9                   # aux
+    lea eax, [r12 - K_INS]              # K_INS and K_LIKE are the writes
+    xor edi, edi
+    cmp eax, 1
+    setbe dil
     call pick
     test rax, rax
     jz .Lps_fail

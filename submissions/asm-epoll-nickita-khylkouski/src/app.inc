@@ -111,7 +111,6 @@
 .equ PC_ERRST, 108                      # dword: 1 when the head op got an ErrorResponse (write ops, kept until Z)
 .equ PC_SQLST, 112                      # SQLSTATE of that error (5 bytes LE)
 .equ PC_SIZE, 256
-.equ PCF_WRITE, 1                       # this connection takes the writes
 .equ PCF_DIRTY, 2                       # PC_OUT has bytes to flush
 .equ PCF_UNSYNCED, 4                    # read statements queued since the last Sync
 .equ PCF_EOUT, 8                        # registered for EPOLLOUT (partial flush)

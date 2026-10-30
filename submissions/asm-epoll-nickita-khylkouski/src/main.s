@@ -51,6 +51,7 @@ DEFSTR m_listen, "listen() failed\n"
 DEFSTR m_workers, "workers: "
 DEFSTR m_irq, "net_rx cpu: "
 DEFSTR m_pgper, "postgres connections per worker: "
+DEFSTR m_pgwr, "postgres connections per worker for writes: "
 DEFSTR m_steer, "cpu steering program (0 = attached, else -errno): "
 DEFSTR m_softirqs, "/proc/softirqs"
 DEFSTR m_interrupts, "/proc/interrupts"
@@ -77,6 +78,8 @@ g_nworkers:     .skip 8
 g_workers:      .skip 8                 # array of g_nworkers worker structs (W_SIZE each)
 .globl g_pg_per
 g_pg_per:       .skip 8                 # Postgres connections per worker
+.globl g_pg_wr
+g_pg_wr:        .skip 8                 # of which the last g_pg_wr take the writes
 .globl g_start_mono
 g_start_mono:   .skip 8                 # monotonic ms at start (uptime_s)
 .globl g_batch_us
@@ -1105,6 +1108,10 @@ _start:
     jbe 12f
     mov eax, MAX_PG
 12: mov [rip + g_pg_per], rax
+    shr rax, 2                          # the last quarter of them, at least one, take the writes
+    jnz 13f
+    mov eax, 1
+13: mov [rip + g_pg_wr], rax
 
     # log the choices
     lea rdi, [rip + m_workers]
@@ -1125,6 +1132,10 @@ _start:
     lea rdi, [rip + m_pgper]
     mov esi, m_pgper_len
     mov rdx, [rip + g_pg_per]
+    call rt_log_num
+    lea rdi, [rip + m_pgwr]
+    mov esi, m_pgwr_len
+    mov rdx, [rip + g_pg_wr]
     call rt_log_num
 
     # worker structs

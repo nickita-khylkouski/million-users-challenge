@@ -57,6 +57,12 @@ jobs:
           git fetch -q --depth 1 origin 74a3ba1e8b912f9c3632861bea11d3434529efd2
           mkdir -p /tmp/pr61 && git archive FETCH_HEAD submissions/asm-epoll-nickita-khylkouski | tar -x -C /tmp/pr61
           (cd /tmp/pr61/submissions/asm-epoll-nickita-khylkouski && bash build.sh)
+      - name: build the previous follow-up, reads and writes on shared connections (control for the 10x runs)
+        if: always()
+        run: |
+          git fetch -q --depth 1 origin e0ea2483500f3e38acb77df3f390ffd58ff36c50
+          mkdir -p /tmp/shared && git archive FETCH_HEAD submissions/asm-epoll-nickita-khylkouski | tar -x -C /tmp/shared
+          (cd /tmp/shared/submissions/asm-epoll-nickita-khylkouski && bash build.sh)
       - name: build the c-epoll entry (a reference server for the 10x load runs)
         if: always()
         continue-on-error: true
@@ -92,11 +98,15 @@ jobs:
         if: always() && !contains(github.event.head_commit.message, '[diag]')
         continue-on-error: true
         run: SUB=/tmp/pr61/submissions/asm-epoll-nickita-khylkouski THINK=0.25 bash ci/load.sh
+      - name: mload, 10x the request rate, shared connections (control)
+        if: always()
+        continue-on-error: true
+        run: SUB=/tmp/shared/submissions/asm-epoll-nickita-khylkouski THINK=0.25 bash ci/load.sh
       - name: mload, 10x the request rate, the c-epoll entry (reference)
         if: always()
         continue-on-error: true
         run: SUB=$PWD/submissions/c-epoll-unorig-username BIN=bin/server THINK=0.25 bash ci/load.sh
-      - name: mload, 10x the request rate, synchronous_commit off (diagnostic)
+      - name: mload, 10x the request rate, this build again (order check)
         if: always()
         continue-on-error: true
-        run: PGSET="synchronous_commit = off" THINK=0.25 bash ci/load.sh
+        run: THINK=0.25 bash ci/load.sh
