@@ -7,10 +7,14 @@ ulimit -n "$(ulimit -Hn)"; echo "nofile $(ulimit -n)"
 start_server 3000
 cpu() { awk '{ print $14 + $15 }' /proc/$SRV/stat; }   # utime + stime of all threads, clock ticks
 t0=$(cpu)
-/tmp/mload -target 127.0.0.1 -ports 3000,3001 -users ${USERS:-20000} -ramp 30s -hold 60s -tokens seed/tokens.json \
-  -gzip -think-scale ${THINK:-2.5} -out /tmp/run.json 2>&1 | tail -25
+python3 ci/sample.py 92 > /tmp/sample.txt &
+SAMPLER=$!
+GODEBUG=gctrace=1 /tmp/mload -target 127.0.0.1 -ports 3000,3001 -users ${USERS:-20000} -ramp 30s -hold 60s -tokens seed/tokens.json \
+  -gzip -think-scale ${THINK:-2.5} -out /tmp/run.json 2>/tmp/mload.err | tail -25
 rc=${PIPESTATUS[0]}
 t1=$(cpu)
+wait $SAMPLER
+grep -v '^gc ' /tmp/mload.err | tail -5
 grep -E "VmRSS|Threads" /proc/$SRV/status
 python3 - "$t0" "$t1" <<'PY'
 import json, os, sys
@@ -20,5 +24,8 @@ for e in r['endpoints']:
     print(f"  {e['name']:22s} ok {e['ok']:8d} fail {e['fail']:4d} p95 {e['p95_ms']:7.1f} ms p99 {e['p99_ms']:7.1f} ms")
 print(f"server cpu {s:.2f} s for {r['reqs']} requests ({r['req_per_s']:.0f}/s): {s * 1e6 / max(r['reqs'], 1):.1f} us per request")
 PY
+echo "-- kernel counters per second (t from the start of mload)"; cat /tmp/sample.txt
+echo "-- the load generator's garbage collections from t = 20 s to 50 s (GODEBUG=gctrace=1)"
+grep '^gc ' /tmp/mload.err | awk '{ t = substr($3, 2) + 0 } t >= 20 && t <= 50 { print "  " $1, $2, $3, $4, $5, "ms,", $11, "MB, goal", $13, "MB" }'
 stop_server
 exit $rc

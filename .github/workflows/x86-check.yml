@@ -53,6 +53,12 @@ jobs:
           git fetch -q --depth 1 origin 74a3ba1e8b912f9c3632861bea11d3434529efd2
           mkdir -p /tmp/pr61 && git archive FETCH_HEAD submissions/asm-epoll-nickita-khylkouski | tar -x -C /tmp/pr61
           (cd /tmp/pr61/submissions/asm-epoll-nickita-khylkouski && bash build.sh)
+      - name: build the c-epoll entry (a reference server for the 10x load runs)
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq bison flex nasm
+          bash submissions/c-epoll-unorig-username/build.sh
       - name: cpu steering
         if: always()
         run: bash ci/steer.sh
@@ -82,3 +88,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: SUB=/tmp/pr61/submissions/asm-epoll-nickita-khylkouski THINK=0.25 bash ci/load.sh
+      - name: mload, 10x the request rate, the c-epoll entry (reference)
+        if: always()
+        continue-on-error: true
+        run: SUB=$PWD/submissions/c-epoll-unorig-username BIN=bin/server THINK=0.25 bash ci/load.sh
