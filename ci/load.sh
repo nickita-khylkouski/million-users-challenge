@@ -12,7 +12,13 @@ t0=$(cpu)
 rc=${PIPESTATUS[0]}
 t1=$(cpu)
 grep -E "VmRSS|Threads" /proc/$SRV/status
-python3 -c "import json, os; r = json.load(open('/tmp/run.json')); s = ($t1 - $t0) / os.sysconf('SC_CLK_TCK'); \
-print(f'server cpu {s:.2f} s for {r[\"reqs\"]} requests ({r[\"req_per_s\"]:.0f}/s): {s * 1e6 / max(r[\"reqs\"], 1):.1f} us per request')"
+python3 - "$t0" "$t1" <<'PY'
+import json, os, sys
+r = json.load(open('/tmp/run.json'))
+s = (int(sys.argv[2]) - int(sys.argv[1])) / os.sysconf('SC_CLK_TCK')
+for e in r['endpoints']:
+    print(f"  {e['name']:22s} ok {e['ok']:8d} fail {e['fail']:4d} p95 {e['p95_ms']:7.1f} ms p99 {e['p99_ms']:7.1f} ms")
+print(f"server cpu {s:.2f} s for {r['reqs']} requests ({r['req_per_s']:.0f}/s): {s * 1e6 / max(r['reqs'], 1):.1f} us per request")
+PY
 stop_server
 exit $rc

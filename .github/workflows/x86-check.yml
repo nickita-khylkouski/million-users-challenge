@@ -69,3 +69,11 @@ jobs:
         if: always()
         continue-on-error: true
         run: THINK=0.25 bash ci/load.sh
+      - name: mload, 10x the request rate, the PR's first commit (control)
+        if: always()
+        continue-on-error: true
+        run: |
+          git fetch -q --depth 1 origin 74a3ba1e8b912f9c3632861bea11d3434529efd2
+          mkdir -p /tmp/pr61 && git archive FETCH_HEAD submissions/asm-epoll-nickita-khylkouski | tar -x -C /tmp/pr61
+          (cd /tmp/pr61/submissions/asm-epoll-nickita-khylkouski && bash build.sh)
+          SUB=/tmp/pr61/submissions/asm-epoll-nickita-khylkouski THINK=0.25 bash ci/load.sh

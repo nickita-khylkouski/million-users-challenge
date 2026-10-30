@@ -1,5 +1,5 @@
 # sourced by the ci/*.sh scripts: start_server ENV... / stop_server
-SUB=$PWD/submissions/asm-epoll-nickita-khylkouski
+SUB=${SUB:-$PWD/submissions/asm-epoll-nickita-khylkouski}
 fresh_db() { psql -qX -d postgres -c "DROP DATABASE IF EXISTS $1 WITH (FORCE)" -c "CREATE DATABASE $1 TEMPLATE feed_seed" >/dev/null; }
 start_server() {   # start_server PORT [VAR=VAL ...]: fresh database, server in the background, waits for /health
   local port=$1; shift
