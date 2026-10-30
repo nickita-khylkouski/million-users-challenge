@@ -48,18 +48,19 @@ cpus = sorted(os.sched_getaffinity(0))
 print("cpus", cpus, "server", pid, "epoll sets before (listeners + postgres):", sets())
 ok = True
 if mode == "percpu":
-    owners = []
-    for cpu in cpus:
-        base = sets()
-        socks = batch(cpu, n)
-        d = diff(sets(), base)
-        owners.append(d.index(max(d)))
-        print(f"client on cpu {cpu}: new connections per worker: {d}")
-        ok &= max(d) >= 0.95 * n
-        for s in socks:
-            s.close()
-        time.sleep(0.5)
-    ok &= len(set(owners)) == len(owners)
+    # rounds of n connections per CPU, CPUs interleaved, so the guard's window sees an even spread
+    owners = {}
+    held = []
+    for r in range(5):
+        for cpu in cpus:
+            base = sets()
+            held += batch(cpu, n)
+            d = diff(sets(), base)
+            w = d.index(max(d))
+            print(f"round {r} client on cpu {cpu}: new connections per worker: {d}")
+            ok &= max(d) >= 0.95 * n and owners.setdefault(cpu, w) == w
+    ok &= len(set(owners.values())) == len(owners)
+    print("cpu -> worker epoll set:", owners)
 elif mode == "guard":
     base = sets()
     first = batch(cpus[1], n)

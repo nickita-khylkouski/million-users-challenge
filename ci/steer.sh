@@ -9,7 +9,8 @@ start_server 3000
 stop_server
 echo; echo "== every worker, one client CPU at a time"
 start_server 3000 SKIP_IRQ_CPU=0
-python3 ci/steer.py $SRV 3000 percpu 200 || rc=1
+python3 ci/steer.py $SRV 3000 percpu 20 || rc=1
+grep -q "cpu steering detached" /tmp/srv.log && { echo "FAIL: the guard fired on an even spread"; rc=1; }
 stop_server
 echo; echo "== guard: all connections from one CPU"
 start_server 3000 SKIP_IRQ_CPU=0

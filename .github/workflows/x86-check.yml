@@ -8,7 +8,11 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     services:
       postgres:
@@ -31,7 +35,7 @@ jobs:
           echo "-- /proc/interrupts"; cat /proc/interrupts
           echo "-- /proc/softirqs"; grep -E "CPU|NET_RX|NET_TX" /proc/softirqs
       - name: tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client jq curl openssl tcpdump
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client jq curl openssl tcpdump gdb
       - name: postgres max_connections = 600
         run: |
           psql -qX -d postgres -c "ALTER SYSTEM SET max_connections = 600"
@@ -40,12 +44,15 @@ jobs:
       - name: seed
         run: bash seed/make-seed.sh
       - name: install.sh
-        run: sudo bash submissions/asm-epoll-nickita-khylkouski/install.sh
-      - name: test/run.sh
+        run: sudo bash submissions/asm-epoll-nickita-khylkouski/install.sh && as --version | head -1
+      - name: test/run.sh (runs build.sh first)
         run: bash test/run.sh submissions/asm-epoll-nickita-khylkouski
       - name: cpu steering
         if: always()
         run: bash ci/steer.sh
+      - name: start-up loop (detector edge cases)
+        if: always()
+        run: bash ci/startloop.sh
       - name: delayed ACKs
         if: always()
         run: bash ci/ack.sh

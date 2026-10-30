@@ -631,8 +631,8 @@ find_irq_cpu:
     add rdi, m_netrx_len
     lea r13, [rbx + r13]                # end pointer
     xor ecx, ecx                        # column
-    mov r8, -1                          # best value
-    mov r9, -1                          # second best
+    xor r8d, r8d                        # best value (counts compare unsigned, so start at 0, not -1)
+    xor r9d, r9d                        # second best
     mov r10d, -1                        # best column
 .Lirq_num:
     cmp ecx, r15d
@@ -679,13 +679,11 @@ find_irq_cpu:
 .Lirq_eval:
     cmp r10d, -1
     je .Lirq_none
-    cmp r9, -1
-    jne 1f
-    xor r9d, r9d
-1:  # dominant: best > 2 * second (and > 0)
+    # dominant: best > 4 * second (and > 0). With one queue the interrupt CPU counts every poll, the others only
+    # the RPS backlogs sent to them; a 4-queue NIC's uneven queues gave 2.4 : 1 on a CI runner, which must not count
     test r8, r8
     jz .Lirq_none
-    lea rax, [r9 + r9]
+    lea rax, [r9*4]
     cmp r8, rax
     jbe .Lirq_none
     mov eax, [r14 + r10*4]
