@@ -1,0 +1,57 @@
+# Checks for submissions/asm-epoll-nickita-khylkouski on a real x86-64 kernel (not part of the submission).
+name: x86 check
+on:
+  push:
+    branches: [x86-check]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: machine
+        run: |
+          uname -a; nproc; grep -m1 "model name" /proc/cpuinfo
+          echo "-- receive queues"; ls -d /sys/class/net/*/queues/rx-* ; cat /sys/class/net/*/queues/rx-*/rps_cpus
+          echo "-- /proc/interrupts"; cat /proc/interrupts
+          echo "-- /proc/softirqs"; grep -E "CPU|NET_RX|NET_TX" /proc/softirqs
+      - name: tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client jq curl openssl tcpdump
+      - name: postgres max_connections = 600
+        run: |
+          psql -qX -d postgres -c "ALTER SYSTEM SET max_connections = 600"
+          docker restart "$(docker ps -q --filter ancestor=postgres:18)"
+          until pg_isready -q; do sleep 1; done
+      - name: seed
+        run: bash seed/make-seed.sh
+      - name: install.sh
+        run: sudo bash submissions/asm-epoll-nickita-khylkouski/install.sh
+      - name: test/run.sh
+        run: bash test/run.sh submissions/asm-epoll-nickita-khylkouski
+      - name: cpu steering
+        if: always()
+        run: bash ci/steer.sh
+      - name: delayed ACKs
+        if: always()
+        run: bash ci/ack.sh
+      - uses: actions/setup-go@v5
+        if: always()
+        with: { go-version-file: bench/mload/go.mod, cache: false }
+      - name: mload smoke run
+        if: always()
+        run: bash ci/load.sh
