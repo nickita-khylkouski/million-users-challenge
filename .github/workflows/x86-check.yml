@@ -51,6 +51,9 @@ jobs:
         run: sudo bash submissions/asm-epoll-nickita-khylkouski/install.sh && as --version | head -1
       - name: test/run.sh (runs build.sh first)
         run: bash test/run.sh submissions/asm-epoll-nickita-khylkouski
+      - name: binary hash (the two runners' binutils should build the same bytes)
+        if: always()
+        run: sha256sum submissions/asm-epoll-nickita-khylkouski/build/server
       - name: build the PR's first commit (control for the retransmission and 10x load runs)
         if: always()
         run: |

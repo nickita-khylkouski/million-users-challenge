@@ -139,10 +139,13 @@ take the writes) and `cpu steering program` (0 = attached). If the guard detache
   packets, `Connection: close`, HTTP/1.0, oversize requests, hundreds of concurrent pipelined connections,
   JWT edge cases (no `exp`, an `alg` other than HS256, a bad `sub`), and Postgres killed mid-run.
 - **Load.** The challenge's `bench/mload` with 20,000 users on 4-vCPU GitHub Actions runners: no errors, p95
-  5.9 ms, p99 6.4 ms, server RSS 7.5 MB. At ten times the request rate (`-think-scale 0.25`, about 7,200
-  requests/s) still no errors, p95 4.7 ms, p99 9.0 ms. The server then used 15 µs of CPU per request on
-  Linux 6.8 (31 µs on 7.0), with the load generator and Postgres on the same four vCPUs: at 60,000
-  requests/s that is about one of a 4-vCPU box's three worker cores, before the kernel's per-packet work.
+  5.9 ms, p99 6.5 ms, server RSS 7.7 MB. At ten times the request rate (`-think-scale 0.25`, about 7,200
+  requests/s) still no errors, p95 4.9–5.3 ms, p99 6.3–8.3 ms, and p99 8–21 ms in the worst 5-second window:
+  about 30 s into a run the runner's disk writes back the database copied for it, and commits slow down. In
+  six runs of builds whose reads and writes shared connections, that window's p99 was 99–316 ms, because the
+  reads pipelined behind a commit waited for it. The server's CPU per request depends on the runner type,
+  16–17 µs on one and 36–43 µs on two others, with the load generator and Postgres on the same four vCPUs; the
+  separate write connections add about 1 µs (a batch's writes now go out in sends of their own).
 - **Steering**, on real x86-64 kernels (GitHub Actions runners with Linux 6.8 and 7.0); x86 emulators refuse
   `SO_ATTACH_REUSEPORT_CBPF`. The program attaches, and every connection from a client pinned to one CPU
   lands on that CPU's worker, a different worker for each CPU. When a single CPU opens all the connections
